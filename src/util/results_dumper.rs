@@ -168,7 +168,6 @@ pub fn dump_ci_pts<P: PAGPath>(
         grouped_pts = inverted_pts;
     }
 
-    println!("bruh");
     for (func_id, pts_map) in grouped_pts {
         pts_writer
             .write_all(
