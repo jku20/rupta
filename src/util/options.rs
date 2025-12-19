@@ -74,6 +74,10 @@ fn make_options_parser() -> Command<'static> {
             .long("dump-pts")
             .takes_value(true)
             .help("Dump points-to results to the output file."))
+        .arg(Arg::new("invert-pts")
+            .long("invert-pts")
+            .takes_value(false)
+            .help("Reverses the path => location relation to a location => path relation"))
         .arg(Arg::new("mir-output")
             .long("dump-mir")
             .takes_value(true)
@@ -115,6 +119,10 @@ pub struct AnalysisOptions {
     pub dump_stats: bool,
     pub call_graph_output: Option<String>,
     pub pts_output: Option<String>,
+
+    /// By default with dump-pts, for every path in the program, rupta prints the locations it may point to. This
+    /// inverts that relation, for every location printing the path which can point to it. 
+    pub invert_pts: bool,
     pub mir_output: Option<String>,
     pub type_indices_output: Option<String>,
     pub dyn_calls_output: Option<String>,
@@ -139,6 +147,7 @@ impl Default for AnalysisOptions {
             dyn_calls_output: None,
             unsafe_stat_output: None,
             func_ctxts_output: None,
+            invert_pts: false,
         }
     }
 }
@@ -215,6 +224,7 @@ impl AnalysisOptions {
 
         self.cast_constraint = !matches.contains_id("no-cast-constraint");
         self.stack_filtering = matches.contains_id("stack-filtering");
+        self.invert_pts = matches.contains_id("invert-pts");
         
         self.dump_stats = matches.contains_id("dump-stats");
         self.call_graph_output = matches.get_one::<String>("call-graph-output").cloned();

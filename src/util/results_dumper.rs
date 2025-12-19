@@ -10,32 +10,32 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::rc::Rc;
 
-use crate::graph::pag::{PAGNodeId, PAG, PAGPath};
-use crate::graph::call_graph::{CallGraph, CGFunction, CGCallSite, CSCallGraph};
+use crate::graph::call_graph::{CGCallSite, CGFunction, CSCallGraph, CallGraph};
+use crate::graph::pag::{PAGNodeId, PAGPath, PAG};
+use crate::mir::analysis_context::AnalysisContext;
 use crate::mir::call_site::{BaseCallSite, CallType};
 use crate::mir::context::{Context, ContextId};
 use crate::mir::function::FuncId;
-use crate::mir::analysis_context::AnalysisContext;
 use crate::mir::path::PathEnum;
-use crate::pta::DiffPTDataTy;
 use crate::pta::strategies::context_strategy::ContextStrategy;
+use crate::pta::DiffPTDataTy;
 use crate::pts_set::points_to::PointsToSet;
 use crate::util;
 
 pub fn dump_results<P: PAGPath, F, S>(
-    acx: &AnalysisContext, 
-    call_graph: &CallGraph<F, S>, 
-    pt_data: &DiffPTDataTy, 
-    pag: &PAG<P>, 
+    acx: &AnalysisContext,
+    call_graph: &CallGraph<F, S>,
+    pt_data: &DiffPTDataTy,
+    pag: &PAG<P>,
 ) where
     F: CGFunction + Into<FuncId>,
     S: CGCallSite + Into<BaseCallSite>,
-    <P as PAGPath>::FuncTy: Ord + std::fmt::Debug + Into<FuncId> + Copy
+    <P as PAGPath>::FuncTy: Ord + std::fmt::Debug + Into<FuncId> + Copy,
 {
     // dump points-to results
     if let Some(pts_output) = &acx.analysis_options.pts_output {
         info!("Dumping points-to results...");
-        dump_ci_pts(acx, pt_data, pag, pts_output);
+        dump_ci_pts(acx, pt_data, pag, pts_output, acx.analysis_options.invert_pts);
         // dump_pts(pt_data, pag, pts_output);
     }
 
@@ -67,12 +67,8 @@ pub fn dump_results<P: PAGPath, F, S>(
     }
 }
 
-
-pub fn dump_call_graph<F, S>(
-    acx: &AnalysisContext, 
-    call_graph: &CallGraph<F, S>, 
-    dot_path: &std::path::Path
-) where 
+pub fn dump_call_graph<F, S>(acx: &AnalysisContext, call_graph: &CallGraph<F, S>, dot_path: &std::path::Path)
+where
     F: CGFunction + Into<FuncId>,
     S: CGCallSite + Into<BaseCallSite>,
 {
@@ -130,8 +126,13 @@ pub fn dump_pts_for<P: PAGPath>(pt_data: &DiffPTDataTy, pag: &PAG<P>, node_id: P
     }
 }
 
-
-pub fn dump_ci_pts<P: PAGPath>(acx: &AnalysisContext, pt_data: &DiffPTDataTy, pag: &PAG<P>, grouped_pts_path: &String) {
+pub fn dump_ci_pts<P: PAGPath>(
+    acx: &AnalysisContext,
+    pt_data: &DiffPTDataTy,
+    pag: &PAG<P>,
+    grouped_pts_path: &String,
+    invert_pts: bool,
+) {
     let mut grouped_pts: BTreeMap<FuncId, HashMap<&PathEnum, HashSet<&PathEnum>>> = BTreeMap::new();
     let pts_map = &pt_data.propa_pts_map;
     let mut pts_writer = BufWriter::new(match &grouped_pts_path[..] {
@@ -152,30 +153,54 @@ pub fn dump_ci_pts<P: PAGPath>(acx: &AnalysisContext, pt_data: &DiffPTDataTy, pa
             }
         }
     }
+    if invert_pts {
+        let mut inverted_pts = BTreeMap::new();
+        for (func_id, pts_map) in grouped_pts {
+            let mut inverted_pts_map: HashMap<&PathEnum, HashSet<&PathEnum>> = HashMap::new();
+            for (v, ks) in pts_map {
+                for k in ks {
+                    inverted_pts_map.entry(k).or_default().insert(v);
+                }
+            }
+            inverted_pts.insert(func_id, inverted_pts_map);
+        }
+
+        grouped_pts = inverted_pts;
+    }
+
+    println!("bruh");
     for (func_id, pts_map) in grouped_pts {
         pts_writer
-            .write_all(format!("{:?} - {:?}\n", func_id, acx.get_function_reference(func_id).to_string()).as_bytes())
+            .write_all(
+                format!(
+                    "{:?} - {:?}\n",
+                    func_id,
+                    acx.get_function_reference(func_id).to_string()
+                )
+                .as_bytes(),
+            )
             .expect("Unable to write data");
         for (pt, pts) in pts_map {
             pts_writer
                 .write_all(format!("\t{:?} ({:?}) ==> {{ ", pt, pts.len()).as_bytes())
                 .expect("Unable to write data");
-            for pointee in pts {
+            for (i, &pointee) in pts.iter().enumerate() {
+                let prefix = if i == 0 { "" } else { ", " };
                 pts_writer
-                    .write_all(format!("{:?} ", pointee).as_bytes())
+                    .write_all(format!("{}{:?}", prefix, pointee).as_bytes())
                     .expect("Unable to write data");
             }
             pts_writer
-                .write_all("}\n".as_bytes())
+                .write_all(" }\n".as_bytes())
                 .expect("Unable to write data");
         }
     }
 }
 
 pub fn dump_mir<F: CGFunction + Into<FuncId>, S: CGCallSite>(
-    acx: &AnalysisContext, 
-    call_graph: &CallGraph<F, S>, 
-    mir_path: &String
+    acx: &AnalysisContext,
+    call_graph: &CallGraph<F, S>,
+    mir_path: &String,
 ) {
     // let mut mir_writer = Box::new(File::create(mir_path).expect("Unable to create file")) as Box<dyn Write>;
     let mut mir_writer = match &mir_path[..] {
@@ -195,18 +220,22 @@ pub fn dump_mir<F: CGFunction + Into<FuncId>, S: CGCallSite>(
             .write_all(format!("[{:?} - {:?}]\n", func_id, func_name).as_bytes())
             .expect("Unable to write data");
         if !acx.tcx.is_mir_available(def_id) {
-            mir_writer.write_all(("Mir is unavailable\n").as_bytes()).expect("Unable to write data");
+            mir_writer
+                .write_all(("Mir is unavailable\n").as_bytes())
+                .expect("Unable to write data");
         } else {
             rustc_middle::mir::write_mir_pretty(acx.tcx, Some(def_id), mir_writer.as_mut()).unwrap();
         }
-        mir_writer.write_all("\n".as_bytes()).expect("Unable to write data");
+        mir_writer
+            .write_all("\n".as_bytes())
+            .expect("Unable to write data");
     }
 }
 
 pub fn dump_dyn_calls<F: CGFunction, S: CGCallSite>(
-    acx: &AnalysisContext, 
-    call_graph: &CallGraph<F, S>, 
-    dyn_calls_path: &String
+    acx: &AnalysisContext,
+    call_graph: &CallGraph<F, S>,
+    dyn_calls_path: &String,
 ) where
     F: Into<FuncId>,
     S: Into<BaseCallSite>,
@@ -327,7 +356,12 @@ fn dump_dyn_calls_(
     }
 }
 
-pub fn dump_func_contexts(acx: &AnalysisContext, call_graph: &CSCallGraph, ctx_strategy: &impl ContextStrategy, func_ctxts_path: &String) {
+pub fn dump_func_contexts(
+    acx: &AnalysisContext,
+    call_graph: &CSCallGraph,
+    ctx_strategy: &impl ContextStrategy,
+    func_ctxts_path: &String,
+) {
     let mut func_ctxts_writer = BufWriter::new(match &func_ctxts_path[..] {
         "stdout" => Box::new(std::io::stdout()) as Box<dyn Write>,
         _ => Box::new(File::create(func_ctxts_path).expect("Unable to create file")) as Box<dyn Write>,
@@ -335,9 +369,12 @@ pub fn dump_func_contexts(acx: &AnalysisContext, call_graph: &CSCallGraph, ctx_s
 
     let mut func_ctxts_map: HashMap<FuncId, HashSet<ContextId>> = HashMap::new();
     for cs_func in call_graph.reach_funcs_iter() {
-        func_ctxts_map.entry(cs_func.func_id).or_default().insert(cs_func.cid);
+        func_ctxts_map
+            .entry(cs_func.func_id)
+            .or_default()
+            .insert(cs_func.cid);
     }
-    
+
     // Sort and print the func_ctxts_map
     let mut sorted_func_ctxts: Vec<(&FuncId, &HashSet<ContextId>)> = func_ctxts_map.iter().collect();
     sorted_func_ctxts.sort_by(|a, b| a.1.len().cmp(&b.1.len()));
@@ -345,7 +382,10 @@ pub fn dump_func_contexts(acx: &AnalysisContext, call_graph: &CSCallGraph, ctx_s
         let func_ref = acx.get_function_reference(*func_id);
         let has_self_parameter = util::has_self_parameter(acx.tcx, func_ref.def_id);
         let has_self_ref_parameter = util::has_self_ref_parameter(acx.tcx, func_ref.def_id);
-        let ctxts: HashSet<Rc<Context<_>>> = ctxts.iter().map(|ctxt_id| ctx_strategy.get_context_by_id(*ctxt_id)).collect();
+        let ctxts: HashSet<Rc<Context<_>>> = ctxts
+            .iter()
+            .map(|ctxt_id| ctx_strategy.get_context_by_id(*ctxt_id))
+            .collect();
         func_ctxts_writer
             .write_all(
                 format!(
@@ -358,11 +398,17 @@ pub fn dump_func_contexts(acx: &AnalysisContext, call_graph: &CSCallGraph, ctx_s
                 .as_bytes(),
             )
             .expect("Unable to write data");
-        func_ctxts_writer.write_all(format!("\t{:?}\n", ctxts).as_bytes()).expect("Unable to write data");
+        func_ctxts_writer
+            .write_all(format!("\t{:?}\n", ctxts).as_bytes())
+            .expect("Unable to write data");
     }
 }
 
-pub fn dump_most_called_funcs<W: Write>(acx: &AnalysisContext, call_graph: &CallGraph<FuncId, BaseCallSite>, stat_writer: &mut BufWriter<W>) {
+pub fn dump_most_called_funcs<W: Write>(
+    acx: &AnalysisContext,
+    call_graph: &CallGraph<FuncId, BaseCallSite>,
+    stat_writer: &mut BufWriter<W>,
+) {
     let edge_references = call_graph.graph.edge_references();
     let mut call_times_map: HashMap<FuncId, u32> = HashMap::new();
     for edge_ref in edge_references {
@@ -386,32 +432,24 @@ pub fn dump_most_called_funcs<W: Write>(acx: &AnalysisContext, call_graph: &Call
     }
 }
 
-
-
 fn path_func_id(value: &PathEnum) -> Option<FuncId> {
     match value {
-        PathEnum::LocalVariable { func_id, .. } 
-        | PathEnum::Parameter { func_id, .. } 
-        | PathEnum::ReturnValue { func_id } 
-        | PathEnum::Auxiliary { func_id, .. } 
+        PathEnum::LocalVariable { func_id, .. }
+        | PathEnum::Parameter { func_id, .. }
+        | PathEnum::ReturnValue { func_id }
+        | PathEnum::Auxiliary { func_id, .. }
         | PathEnum::HeapObj { func_id, .. } => Some(*func_id),
-        PathEnum::Constant 
-        | PathEnum::StaticVariable { .. } 
-        | PathEnum::PromotedConstant { .. } => {
-            None
-        }
-        PathEnum::QualifiedPath { base, .. } 
-        | PathEnum::OffsetPath { base, .. } => path_func_id(&base.value),
-        PathEnum::Function(..) 
-        | PathEnum::PromotedArgumentV1Array 
-        | PathEnum::PromotedStrRefArray 
+        PathEnum::Constant | PathEnum::StaticVariable { .. } | PathEnum::PromotedConstant { .. } => None,
+        PathEnum::QualifiedPath { base, .. } | PathEnum::OffsetPath { base, .. } => path_func_id(&base.value),
+        PathEnum::Function(..)
+        | PathEnum::PromotedArgumentV1Array
+        | PathEnum::PromotedStrRefArray
         | PathEnum::Type(..) => None,
     }
 }
 
-fn to_ci_call_graph<F, S>(
-    call_graph: &CallGraph<F, S>, 
-) -> CallGraph<FuncId, BaseCallSite> where 
+fn to_ci_call_graph<F, S>(call_graph: &CallGraph<F, S>) -> CallGraph<FuncId, BaseCallSite>
+where
     F: CGFunction + Into<FuncId>,
     S: CGCallSite + Into<BaseCallSite>,
 {
